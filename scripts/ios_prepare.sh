@@ -34,7 +34,9 @@ PORT_DIR="$(cd "$PORT_DIR" && pwd)"
 IOS_DIR="$APP_DIR/ios"
 RUST_DIR="$APP_DIR/kugou_api_server/rust"
 XCFRAMEWORK="$RUST_DIR/build/KugouServer.xcframework"
-DEVICE_LIB="$XCFRAMEWORK/ios-arm64/libkugou_server.a"
+# 直接对 cargo 产出的静态库做 -force_load，**不经过 xcodebuild -create-xcframework 的副本**，
+# 少一个可能改动/丢符号的环节（诊断时曾观察到 xcframework 副本里找不到 C 符号）。
+DEVICE_LIB="$RUST_DIR/target/aarch64-apple-ios/release/libkugou_server.a"
 
 BUNDLE_ORG="com.md3music"
 PROJECT_NAME="md3music"
@@ -178,7 +180,7 @@ Pod::Spec.new do |s|
   s.ios.deployment_target = '$DEPLOY_TARGET'
 
   s.source_files   = []
-  s.preserve_paths = 'build/KugouServer.xcframework'
+  s.preserve_paths = 'target/aarch64-apple-ios/release/libkugou_server.a'
 
   s.user_target_xcconfig = {
     'OTHER_LDFLAGS' => '\$(inherited)' \\
@@ -277,13 +279,13 @@ if grep -q 'md3music-ios' "$PODFILE"; then
   log "Podfile 已打过补丁，跳过"
 else
   log "给 Podfile 打补丁…"
-  python3 - "$PODFILE" "$DEPLOY_TARGET" "$RUST_DIR" "$XCFRAMEWORK" <<'PY'
+  python3 - "$PODFILE" "$DEPLOY_TARGET" "$RUST_DIR" "$DEVICE_LIB" <<'PY'
 import pathlib, sys
 
 podfile = pathlib.Path(sys.argv[1])
 target = sys.argv[2]
 rust_dir = sys.argv[3]
-xcframework = sys.argv[4]
+device_lib = sys.argv[4]
 text = podfile.read_text(encoding="utf-8")
 
 # 6.1 打开 platform 行
@@ -304,7 +306,7 @@ insert = (
     + "\n"
     + "  # === md3music-ios: 嵌入 Rust API 服务器（静态库 linker flags）===\n"
     + "  # 未构建 XCFramework 时自动跳过，App 以「无本地 API」模式构建，CI 不会因此失败。\n"
-    + f"  if File.directory?('{xcframework}')\n"
+    + f"  if File.exist?('{device_lib}')\n"
     + f"    pod 'kugou_server', :path => '{rust_dir}'\n"
     + "  else\n"
     + "    puts '[md3music-ios] KugouServer.xcframework 不存在，跳过 Rust 静态库链接'\n"
