@@ -136,35 +136,13 @@ jobs:
             echo "⚠️ Rust XCFramework 构建失败，IPA 将以「无本地 API」模式产出（见上方日志）"
           fi
 
-      - name: 检查静态库中的导出符号
+      - name: 诊断 Rust 静态库符号导出链路
         if: ${{ steps.rust.outcome == 'success' }}
         continue-on-error: true
-        working-directory: app
         run: |
-          set -uo pipefail
-          LIB=kugou_api_server/rust/build/KugouServer.xcframework/ios-arm64/libkugou_server.a
-          echo "归档: $LIB ($(du -h "$LIB" | cut -f1))"
-
-          # 注意：不要假设符号前导下划线。Mach-O 通常是 _start_server，
-          # 但这里用不带锚点、不带的模式，两种命名都能命中。
-          echo "--- [1] nm -gU 中匹配 server 的符号（不限命名）---"
-          nm -gU "$LIB" 2>/dev/null | grep -i -E 'start_server|stop_server|is_server_running|get_server_port' | head -20 || echo "(none)"
-
-          echo "--- [2] nm -gU 输出格式抽样（前 15 行）---"
-          nm -gU "$LIB" 2>/dev/null | head -15 || echo "(nm 无输出)"
-
-          echo "--- [3] nm -gU 全局符号总数 ---"
-          nm -gU "$LIB" 2>/dev/null | wc -l
-
-          echo "--- [4] strings 兜底（符号名会以原始字符串出现在符号表里）---"
-          strings -a "$LIB" 2>/dev/null | grep -E '^_?(start|stop)_server$|^_?is_server_running$|^_?get_server_port$' | sort -u | head || echo "(none)"
-
-          echo "--- [5] 归档成员（排除 std/core/alloc/compiler_builtins 等内置 crate）---"
-          ar t "$LIB" 2>/dev/null | grep -v -i -E '^(std|core|alloc|compiler_builtins|panic_|rustc_std_workspace|hashbrown|memchr|adler|miniz|object|gimli|addr2line|libc|getrandom|cfg_if|once_cell|bitflags|smallvec|unicode|zerocopy|cc|shlex|log|bytes|futures)' | head -30 || echo "(ar 读取失败)"
-
-          echo "--- [6] 查找本体 crate 的成员 ---"
-          ar t "$LIB" 2>/dev/null | grep -i 'kugou' | head -10 || echo "(未找到 kugou 相关成员)"
-          echo "--- 诊断结束 ---"
+          # 用独立脚本执行，绕开 runner 外层的 `bash -e`，
+          # 否则 pipefail + head 的 SIGPIPE 会让诊断中途夭折
+          bash port/scripts/diag_rust_ios.sh "$PWD/app"
 
       - name: flutter pub get
         working-directory: app
