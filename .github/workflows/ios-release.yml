@@ -138,15 +138,33 @@ jobs:
 
       - name: 检查静态库中的导出符号
         if: ${{ steps.rust.outcome == 'success' }}
+        continue-on-error: true
         working-directory: app
         run: |
           set -uo pipefail
           LIB=kugou_api_server/rust/build/KugouServer.xcframework/ios-arm64/libkugou_server.a
           echo "归档: $LIB ($(du -h "$LIB" | cut -f1))"
-          echo "--- 归档中的 C 导出符号 ---"
-          nm -gU "$LIB" 2>/dev/null | grep -E '_start_server|_stop_server|_is_server_running|_get_server_port' || echo "(归档中未找到这些符号 —— 需要检查 Rust 侧 #[no_mangle] 导出)"
-          echo "--- 归档全局符号总数 ---"
+
+          # 注意：不要假设符号前导下划线。Mach-O 通常是 _start_server，
+          # 但这里用不带锚点、不带的模式，两种命名都能命中。
+          echo "--- [1] nm -gU 中匹配 server 的符号（不限命名）---"
+          nm -gU "$LIB" 2>/dev/null | grep -i -E 'start_server|stop_server|is_server_running|get_server_port' | head -20 || echo "(none)"
+
+          echo "--- [2] nm -gU 输出格式抽样（前 15 行）---"
+          nm -gU "$LIB" 2>/dev/null | head -15 || echo "(nm 无输出)"
+
+          echo "--- [3] nm -gU 全局符号总数 ---"
           nm -gU "$LIB" 2>/dev/null | wc -l
+
+          echo "--- [4] strings 兜底（符号名会以原始字符串出现在符号表里）---"
+          strings -a "$LIB" 2>/dev/null | grep -E '^_?(start|stop)_server$|^_?is_server_running$|^_?get_server_port$' | sort -u | head || echo "(none)"
+
+          echo "--- [5] 归档成员（排除 std/core/alloc/compiler_builtins 等内置 crate）---"
+          ar t "$LIB" 2>/dev/null | grep -v -i -E '^(std|core|alloc|compiler_builtins|panic_|rustc_std_workspace|hashbrown|memchr|adler|miniz|object|gimli|addr2line|libc|getrandom|cfg_if|once_cell|bitflags|smallvec|unicode|zerocopy|cc|shlex|log|bytes|futures)' | head -30 || echo "(ar 读取失败)"
+
+          echo "--- [6] 查找本体 crate 的成员 ---"
+          ar t "$LIB" 2>/dev/null | grep -i 'kugou' | head -10 || echo "(未找到 kugou 相关成员)"
+          echo "--- 诊断结束 ---"
 
       - name: flutter pub get
         working-directory: app
@@ -178,16 +196,17 @@ jobs:
           #   nm  -> 符号表
           #   dyld_info -> 导出表（export trie）
           #   otool -Iv -> 间接符号表
+          # 符号名不写死前导下划线，_start_server 与 start_server 都能命中
           check_symbol() {
-            local sym="$1"
-            nm -gU "$BIN" 2>/dev/null | grep -q " $sym\$" && return 0
-            dyld_info -exports "$BIN" 2>/dev/null | grep -q "[[:space:]]$sym\$" && return 0
-            otool -Iv "$BIN" 2>/dev/null | grep -q "[[:space:]]$sym\$" && return 0
+            local base="$1"
+            nm -gU "$BIN" 2>/dev/null | grep -qE "[[:space:]]_?${base}\$" && return 0
+            dyld_info -exports "$BIN" 2>/dev/null | grep -qE "[[:space:]]_?${base}\$" && return 0
+            otool -Iv "$BIN" 2>/dev/null | grep -qE "[[:space:]]_?${base}\$" && return 0
             return 1
           }
 
           MISSING=0
-          for sym in _start_server _stop_server _is_server_running; do
+          for sym in start_server stop_server is_server_running; do
             if check_symbol "$sym"; then
               echo "✅ 找到 $sym"
             else
