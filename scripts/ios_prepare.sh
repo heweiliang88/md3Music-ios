@@ -112,7 +112,7 @@ print(f"[ios-prepare] AppIcon 已生成 1024x1024（源图 {w}x{h}）")
 PY
   fi
 
-  if [[ "$ICON_OK" != "1" ]]; then
+  if [[ "$ICON_OK" != "1" ]] && command -v sips >/dev/null 2>&1; then
     log "未安装 Pillow，退回 sips 处理"
     # jpeg 中转可去掉 alpha 通道（iOS 图标不允许透明）
     W=$(sips -g pixelWidth "$ICON_SRC" | awk '/pixelWidth/{print $2}')
@@ -124,7 +124,8 @@ PY
     sips -z 1024 1024 "$ICONSET/AppIcon-1024.png" >/dev/null   # 缩放到 1024
   fi
 
-  cat > "$ICONSET/Contents.json" <<'JSON'
+  if [[ -f "$ICONSET/AppIcon-1024.png" ]]; then
+    cat > "$ICONSET/Contents.json" <<'JSON'
 {
   "images" : [
     {
@@ -140,8 +141,14 @@ PY
   }
 }
 JSON
-  ls -lh "$ICONSET"
-  log "AppIcon.appiconset 已写入（单尺寸 1024）"
+    ls -lh "$ICONSET"
+    log "AppIcon.appiconset 已写入（单尺寸 1024）"
+  else
+    # 典型场景：Linux runner（CI 只做脚本校验，不出 IPA），既无 Pillow 也无 sips。
+    # 这里优雅跳过，释放环境不做强校验；真正的 iOS 构建在 macOS runner 上，
+    # 由 ios-release.yml 的「确认改动已落地」步骤强校验图标必须存在。
+    log "⚠️ 当前环境无法处理图片（无 Pillow 且无 sips），跳过图标生成（保留 Flutter 默认图标）"
+  fi
 else
   log "⚠️ 未找到官方图标源文件，保留模板默认图标"
 fi
