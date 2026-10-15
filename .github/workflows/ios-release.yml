@@ -1,0 +1,196 @@
+name: iOS Release (unsigned IPA)
+
+# 触发方式：
+#   1. 推送 v* 标签        -> 构建并创建 GitHub Release，附上 ipa
+#   2. 手动 workflow_dispatch -> 只构建并上传 Artifact
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: '上游 md3Music 分支/标签（移植基准）'
+        required: false
+        default: 'rust-local-force'
+      attach_rust_server:
+        description: '编译并链接 Rust API 服务器（失败不影响出包）'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: https://github.com/zzyoxml/md3Music.git
+  UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'rust-local-force' }}
+  ATTACH_RUST: ${{ github.event.inputs.attach_rust_server || 'true' }}
+
+jobs:
+  build-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout 移植层
+        uses: actions/checkout@v4
+        with:
+          path: port
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: 打印工具链版本
+        run: |
+          flutter --version
+          dart --version
+          xcodebuild -version
+          pod --version || true
+          rustc --version || true
+
+      # ---------------------------------------------------------------------
+      # 准备源码：优先用本仓库内的源码（若已同步上游），否则从上游拉取
+      # ---------------------------------------------------------------------
+      - name: 准备上游源码
+        run: |
+          set -euo pipefail
+          if [ -f port/lib/main.dart ] && [ -f port/pubspec.yaml ]; then
+            echo "[ci] 使用本仓库内的源码"
+            mkdir -p app
+            tar -C port -cf - --exclude=.git --exclude=.github . | tar -C app -xf -
+          else
+            echo "[ci] 从上游拉取 $UPSTREAM_REPO @ $UPSTREAM_REF"
+            git clone --depth 1 --branch "$UPSTREAM_REF" "$UPSTREAM_REPO" app
+          fi
+          ls -la app | head -30
+
+      - name: 叠加移植层（源码改造 + iOS 工程）
+        run: bash port/scripts/apply_overlay.sh "$PWD/app" "$PWD/port"
+
+      - name: 确认改动已落地
+        run: |
+          set -euo pipefail
+          echo "--- Cargo.toml crate-type ---"
+          grep -n 'crate-type' app/kugou_api_server/rust/Cargo.toml
+          echo "--- Dart iOS 分支 ---"
+          grep -n 'md3music-ios' app/lib/services/kugou_server.dart | head -10
+          echo "--- ios/ 工程 ---"
+          ls app/ios
+
+      # ---------------------------------------------------------------------
+      # Rust API 服务器（best-effort：失败也能出 IPA，只是 App 没有本地 API）
+      # ---------------------------------------------------------------------
+      - name: 编译 Rust API 服务器为 XCFramework
+        id: rust
+        if: ${{ env.ATTACH_RUST == 'true' }}
+        continue-on-error: true
+        run: bash port/scripts/build_rust_ios.sh "$PWD/app"
+
+      - name: Rust 编译结果
+        if: ${{ steps.rust.conclusion != '' }}
+        run: |
+          if [ "${{ steps.rust.outcome }}" = "success" ]; then
+            echo "✅ Rust XCFramework 构建成功，IPA 将包含本地 API 服务能力"
+          else
+            echo "⚠️ Rust XCFramework 构建失败，IPA 将以「无本地 API」模式产出（见上方日志）"
+          fi
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # ---------------------------------------------------------------------
+      # 构建 IPA
+      # ---------------------------------------------------------------------
+      - name: 构建 iOS（no-codesign）
+        working-directory: app
+        run: flutter build ios --release --no-codesign
+
+      - name: 打包为 ipa
+        id: package
+        working-directory: app
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}' | cut -d+ -f1)"
+          [ -n "$VERSION" ] || VERSION="0.0.0"
+          MODE="standard"
+          if [ -d kugou_api_server/rust/build/KugouServer.xcframework ]; then
+            MODE="with-rust-server"
+          fi
+          NAME="MD3Music-${VERSION}-ios-${MODE}-unsigned"
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "IPA_NAME=$NAME" >> "$GITHUB_OUTPUT"
+
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          [ -d "$APP_PATH" ] || { echo "找不到 $APP_PATH"; exit 1; }
+
+          rm -rf build/ipa && mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          (cd build/ipa && zip -qry "../${NAME}.ipa" Payload)
+
+          ls -lh "build/${NAME}.ipa"
+          echo "IPA_PATH=build/${NAME}.ipa" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 IPA（Artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.IPA_NAME }}
+          path: app/${{ steps.package.outputs.IPA_PATH }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: 上传 dSYM（用于符号化崩溃日志）
+        if: ${{ hashFiles('app/build/ios/iphoneos/Runner.app.dSYM') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsym-${{ steps.package.outputs.APP_VERSION }}
+          path: app/build/ios/iphoneos/Runner.app.dSYM
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: 构建摘要
+        run: |
+          {
+            echo "## iOS 构建完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 版本 | \`${{ steps.package.outputs.APP_VERSION }}\` |"
+            echo "| 产物 | \`${{ steps.package.outputs.IPA_NAME }}.ipa\` |"
+            echo "| 上游基准 | \`$UPSTREAM_REF\` |"
+            echo "| 签名 | 未签名（unsigned，需自行签名后安装） |"
+            echo "| Rust API 服务器 | ${{ steps.rust.outcome == 'success' && '✅ 已链接' || '⚠️ 未链接（App 以无本地 API 模式运行）' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      # 标签触发时创建 Release
+      # ---------------------------------------------------------------------
+      - name: 创建 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MD3Music iOS ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: |
+            ## MD3Music iOS ${{ github.ref_name }}
+
+            由 GitHub Actions 在 macOS runner 上自动构建。
+
+            ### 下载
+            - **${{ steps.package.outputs.IPA_NAME }}.ipa** — 未签名 IPA
+
+            ### 说明
+            - 本产物为 **unsigned IPA**，未做任何签名，无法直接安装到未越狱设备；
+              需要自行用 AltStore / Sideloadly / 开发者证书重签后安装。
+            - 上游基准：`${{ env.UPSTREAM_REPO }}` @ `${{ env.UPSTREAM_REF }}`
+            - Rust API 服务器：${{ steps.rust.outcome == 'success' && '已编译并链接进 App' || '未链接 —— App 启动后本地 API 服务不可用' }}
+
+            > 本项目为 md3Music 的 iOS 移植层，仅供学习研究，遵循 AGPL-3.0。
+          files: |
+            app/${{ steps.package.outputs.IPA_PATH }}
