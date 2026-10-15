@@ -20,7 +20,7 @@ RUST_DIR="$APP_DIR/kugou_api_server/rust"
 BUILD_DIR="$RUST_DIR/build"
 DEVICE_TARGET="aarch64-apple-ios"
 SIM_TARGET="aarch64-apple-ios-sim"
-IOS_MIN="14.0"
+IOS_MIN="15.0"
 
 log() { printf '[rust-ios] %s\n' "$*"; }
 
