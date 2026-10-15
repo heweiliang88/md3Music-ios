@@ -67,6 +67,9 @@ jobs:
           pod --version || true
           rustc --version || true
 
+      - name: 安装图标处理依赖
+        run: python3 -m pip install --quiet --disable-pip-version-check pillow
+
       # ---------------------------------------------------------------------
       # 准备源码：优先用本仓库内的源码（若已同步上游），否则从上游拉取
       # ---------------------------------------------------------------------
@@ -95,6 +98,16 @@ jobs:
           grep -n 'md3music-ios' app/lib/services/kugou_server.dart | head -10
           echo "--- ios/ 工程 ---"
           ls app/ios
+          echo "--- 应用图标 ---"
+          ls -lh app/ios/Runner/Assets.xcassets/AppIcon.appiconset/
+          test -f app/ios/Runner/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png \
+            || { echo "❌ AppIcon-1024.png 未生成"; exit 1; }
+          echo "--- Rust podspec ---"
+          test -f app/kugou_api_server/rust/kugou_server.podspec \
+            || { echo "❌ kugou_server.podspec 未生成"; exit 1; }
+          grep -n 'force_load' app/kugou_api_server/rust/kugou_server.podspec
+          echo "--- Podfile 是否接入 kugou_server ---"
+          grep -n "kugou_server" app/ios/Podfile
 
       # ---------------------------------------------------------------------
       # Rust API 服务器（best-effort：失败也能出 IPA，只是 App 没有本地 API）
@@ -125,6 +138,67 @@ jobs:
         working-directory: app
         run: flutter build ios --release --no-codesign
 
+      # ---------------------------------------------------------------------
+      # 门禁：确认 Rust 符号真的进了二进制
+      #
+      # 这是上一次失败的直接原因 —— 静态库没被 -force_load 链进去，
+      # 但构建依然"成功"，直到装到设备上才发现本地 API 起不来。
+      # 这里用 nm 直接检查导出符号，缺失就中断，绝不放行。
+      # ---------------------------------------------------------------------
+      - name: 校验 Rust 符号已链接进 App 二进制
+        working-directory: app
+        run: |
+          set -euo pipefail
+          BIN="build/ios/iphoneos/Runner.app/Runner"
+          [ -f "$BIN" ] || { echo "❌ 找不到 $BIN"; exit 1; }
+          echo "二进制大小: $(du -h "$BIN" | cut -f1)"
+
+          # Release 构建可能 strip 符号表，这里三条路径都试：
+          #   nm  -> 符号表
+          #   dyld_info -> 导出表（export trie）
+          #   otool -Iv -> 间接符号表
+          check_symbol() {
+            local sym="$1"
+            nm -gU "$BIN" 2>/dev/null | grep -q " $sym\$" && return 0
+            dyld_info -exports "$BIN" 2>/dev/null | grep -q "[[:space:]]$sym\$" && return 0
+            otool -Iv "$BIN" 2>/dev/null | grep -q "[[:space:]]$sym\$" && return 0
+            return 1
+          }
+
+          MISSING=0
+          for sym in _start_server _stop_server _is_server_running; do
+            if check_symbol "$sym"; then
+              echo "✅ 找到 $sym"
+            else
+              echo "❌ 缺失 $sym"
+              MISSING=1
+            fi
+          done
+
+          if [ "$MISSING" != "0" ]; then
+            echo
+            echo "===================== 诊断信息 ====================="
+            echo "[podspec 里的 force_load]"
+            grep -n "force_load" kugou_api_server/rust/kugou_server.podspec || echo "(未找到)"
+            echo
+            echo "[Pods-Runner 生成 xcconfig 里的 OTHER_LDFLAGS]"
+            grep -rh "OTHER_LDFLAGS" "ios/Pods/Target Support Files/Pods-Runner/" 2>/dev/null || echo "(未找到)"
+            echo
+            echo "[pod install 是否识别到 kugou_server]"
+            grep -n "kugou_server" ios/Podfile.lock 2>/dev/null || echo "(Podfile.lock 里没有 kugou_server)"
+            echo
+            echo "[nm 导出的符号总数]"
+            nm -gU "$BIN" 2>/dev/null | wc -l || true
+            echo
+            echo "[含 kugou / server 的符号]"
+            nm -a "$BIN" 2>/dev/null | grep -i -E "kugou|_start_server" | head -20 || true
+            echo "===================================================="
+            echo "❌ Rust 静态库未正确链接 —— 本地 API 服务将无法启动，中止构建"
+            exit 1
+          fi
+          echo "✅ Rust 符号校验通过（本地 API 服务可用）"
+          echo "true" > build/.rust-linked
+
       - name: 打包为 ipa
         id: package
         working-directory: app
@@ -133,12 +207,14 @@ jobs:
           VERSION="$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}' | cut -d+ -f1)"
           [ -n "$VERSION" ] || VERSION="0.0.0"
           MODE="standard"
-          if [ -d kugou_api_server/rust/build/KugouServer.xcframework ]; then
+          HAS_RUST="$(cat build/.rust-linked 2>/dev/null || echo false)"
+          if [ "$HAS_RUST" = "true" ]; then
             MODE="with-rust-server"
           fi
           NAME="MD3Music-${VERSION}-ios-${MODE}-unsigned"
           echo "APP_VERSION=$VERSION" >> "$GITHUB_OUTPUT"
           echo "IPA_NAME=$NAME" >> "$GITHUB_OUTPUT"
+          echo "HAS_RUST=$HAS_RUST" >> "$GITHUB_OUTPUT"
 
           APP_PATH="build/ios/iphoneos/Runner.app"
           [ -d "$APP_PATH" ] || { echo "找不到 $APP_PATH"; exit 1; }
@@ -179,7 +255,8 @@ jobs:
             echo "| 产物 | \`${{ steps.package.outputs.IPA_NAME }}.ipa\` |"
             echo "| 上游基准 | \`$UPSTREAM_REF\` |"
             echo "| 签名 | 未签名（unsigned，需自行签名后安装） |"
-            echo "| Rust API 服务器 | ${{ steps.rust.outcome == 'success' && '✅ 已链接' || '⚠️ 未链接（App 以无本地 API 模式运行）' }} |"
+            echo "| 应用图标 | ✅ 上游官方图标（assets/images/app_icon.png） |"
+            echo "| Rust 本地 API | ${{ steps.package.outputs.HAS_RUST == 'true' && '✅ 已链接（符号校验通过）' || '⚠️ 未链接 —— 在线内容将不可用' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---------------------------------------------------------------------
@@ -203,8 +280,10 @@ jobs:
             ### 说明
             - 本产物为 **unsigned IPA**，未做任何签名，无法直接安装到未越狱设备；
               需要自行用 AltStore / Sideloadly / 开发者证书重签后安装。
+            - 最低系统版本：**iOS / iPadOS 15.0**（已在 iPadOS 16.4.1 上验证目标）
+            - 应用图标：使用上游官方 `assets/images/app_icon.png`
             - 上游基准：`${{ env.UPSTREAM_REPO }}` @ `${{ env.UPSTREAM_REF }}`
-            - Rust API 服务器：${{ steps.rust.outcome == 'success' && '已编译并链接进 App' || '未链接 —— App 启动后本地 API 服务不可用' }}
+            - Rust 本地 API 服务：${{ steps.package.outputs.HAS_RUST == 'true' && '**已链接**（`start_server` 等符号校验通过）' || '**未链接** —— 在线内容不可用' }}
 
             > 本项目为 md3Music 的 iOS 移植层，仅供学习研究，遵循 AGPL-3.0。
           files: |
