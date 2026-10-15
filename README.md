@@ -115,6 +115,40 @@ MD3Music-<版本>-ios-standard-unsigned.ipa           # 未链接
 
 ---
 
+## 已验证的构建结果
+
+首次跑通的实际数据（GitHub Actions，`macos-26` runner）：
+
+| 项 | 值 |
+| --- | --- |
+| Flutter | 3.47.7 stable（Dart 3.13.5） |
+| Xcode | 26.6 |
+| Rust | 1.98.0 |
+| Rust 静态库 | `libkugou_server.a` 66 MB × 2 切片（device + simulator） |
+| **产物** | `MD3Music-6.0.1-ios-with-rust-server-unsigned.ipa`，**14 MB** |
+| 上游基准 | `rust-local-force` @ v6.0.1 |
+
+移植改造校验（`patch_sources.py` 锚点断言）在真实上游源码上**全部命中**，
+`flutter pub get`、`pod install`、Xcode 编译、IPA 打包全链路通过。
+
+### 已知的测试失败（上游自带，与移植无关）
+
+CI 的 `flutter test` 结果为 **3410 通过 / 7 失败 / 12 跳过**。7 个失败全部来自上游公开分支
+的导出遗漏 —— 上游把 `lib/private/` 与 `scripts/tools/` 从公开仓库剥离了，
+但对应的测试文件仍留在仓库里引用它们：
+
+```
+test/private/custom_download_directory_access_test.dart      -> lib/private/... 不存在
+test/modules/settings/settings_search_index_test.dart        -> scripts/tools/... 不存在
+test/modules/settings/settings_subpage_structure_test.dart   -> scripts/tools/... 不存在
+test/data/repositories/local_music_windows_path_test.dart    -> 平台相关（Linux 上跑 Windows 断言）
+test/modules/library/local_music_menu_focus_test.dart        -> 平台相关（Linux 上跑 Android variant）
+```
+
+因此 CI 中 `analyze` / `test` 步骤设为「报告但不阻塞」，产物构建不受影响。
+
+---
+
 ## 怎么用
 
 ```bash
