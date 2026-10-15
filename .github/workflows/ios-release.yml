@@ -30,7 +30,9 @@ env:
 jobs:
   build-ipa:
     name: Build unsigned IPA
-    runs-on: macos-14
+    # macos-14 只带 Xcode 15.4，SDK 过旧：
+    # connectivity_plus 等插件已使用 iOS 26 SDK 的 API（NWPath.isUltraConstrained）
+    runs-on: macos-26
     timeout-minutes: 90
 
     steps:
@@ -44,6 +46,18 @@ jobs:
         with:
           channel: stable
           cache: true
+
+      - name: 选择最新可用 Xcode
+        run: |
+          set -euo pipefail
+          echo "镜像内可用 Xcode："
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          NEWEST="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$NEWEST" ]; then
+            echo "切换到 $NEWEST"
+            sudo xcode-select -s "$NEWEST"
+          fi
+          xcodebuild -version
 
       - name: 打印工具链版本
         run: |
