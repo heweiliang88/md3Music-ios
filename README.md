@@ -183,6 +183,53 @@ git tag v6.0.1-ios.1 && git push origin v6.0.1-ios.1
 
 ---
 
+## 修复记录
+
+### v6.0.1-ios.2 — 修复「应用无图标」与「本地 API 未启动」
+
+首次发版（`v6.0.1-ios.1`）在真机上表现为：**App 图标是 Flutter 默认图标、在线内容全部不可用**。
+两个根因如下，均已修复并加了门禁。
+
+#### 问题 1：应用没有图标
+
+`ios/` 工程由 `flutter create` 生成，用的是 **Flutter 模板默认图标**，
+上游的官方图标 `assets/images/app_icon.png` 从未被写进 `AppIcon.appiconset`。
+
+修复：`ios_prepare.sh` 现在会用上游官方图标生成 `AppIcon-1024.png`
+（居中裁剪为正方形 → 合成白底去掉 alpha → 缩放 1024），并写入单尺寸 `Contents.json`。
+
+> iOS 应用图标不允许带 alpha 通道，带透明度的 PNG 会被 App Store / 安装流程拒绝，
+> 因此脚本会显式合成到白底。
+
+#### 问题 2：本地 API 服务未启动（在线内容不可用）→ Rust 静态库根本没被链接
+
+这是**两个 bug 叠加**，而且都不会让构建失败，属于典型的静默失效：
+
+| # | 问题 | 说明 |
+| --- | --- | --- |
+| 1 | **Podfile 里用相对路径判断** | `if File.directory?(File.join(Dir.pwd, '..', ...))`。CocoaPods 求值 Podfile 时 `Dir.pwd` 不可靠，判断为假 → `pod 'kugou_server'` 整行被跳过。`pod install` 依旧"成功"，看不出任何异常。 |
+| 2 | **`-force_load` 写在 Podfile 的 post_install 里** | 在 `post_install` 里改 **user target** 的 `build_settings` **不会写盘** —— CocoaPods 只保存 Pods 工程。所以即便 pod 加上了，链接参数也到不了 Runner（App）target。 |
+
+修复方式：
+
+1. 路径全部改为**绝对路径**（由 `ios_prepare.sh` 在构建时算出来并写入 Podfile）。
+2. `-force_load` 改为通过**生成的 podspec** 的 `user_target_xcconfig` 注入 ——
+   这是 CocoaPods 官方支持、且会真正写进 `Pods-Runner.*.xcconfig`、最终作用于 App target 的通道。
+
+> 顺带修掉一个隐患：iOS 分支启动前现在会 `createSync(recursive: true)` 建好
+> Application Support 目录，避免 Rust 侧首次写 `device_info.json` 失败导致服务起不来。
+
+#### 新增门禁：符号校验（关键）
+
+`ios-release.yml` 在 `flutter build ios` 之后增加了**硬性校验**：
+用 `nm` / `dyld_info` / `otool` 三条路径确认
+`_start_server`、`_stop_server`、`_is_server_running` 确实导出了。
+**缺失就直接中断构建**，不再产出"看起来成功、装上却不能联网"的 IPA。
+
+上次就是因为缺少这道门禁，坏包才被发到 Release。
+
+---
+
 ## 许可与署名
 
 本项目是 [zzyoxml/md3Music](https://github.com/zzyoxml/md3Music) 的移植，遵循上游的
