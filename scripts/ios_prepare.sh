@@ -165,9 +165,13 @@ cat > "$RUST_DIR/kugou_server.podspec" <<PODSPEC
 #        "无人引用"的代码整个剔除（实测：二进制里只剩该 .a 的 OSO 调试映射，
 #        813 个全局符号里找不到 _start_server）              -> -u <symbol>
 #
-#   -u 把符号声明为"必须解析的未定义引用"，链接器就会把它当作死代码消除的
-#   根节点，连同它可达的整条调用链（tiny_http / ureq / rustls ...）一起保留，
-#   并作为全局符号导出到主程序，dlsym 才能查到。
+#   -Wl,-u,<symbol> 把符号声明为"必须解析的未定义引用"，链接器就会把它当作
+#   死代码消除的根节点，连同它可达的整条调用链（tiny_http / ureq / rustls ...）
+#   一起保留，并作为全局符号导出到主程序，dlsym 才能查到。
+#
+#   ⚠️ 必须写成 -Wl,-u,_start_server，不能写成 "-u _start_server"：
+#   clang 的 -u 是连写形式，分开写时它会把 _start_server 当成链接输入文件，
+#   报 "No such file or directory: '_start_server'"（已实测踩过）。
 Pod::Spec.new do |s|
   s.name             = 'kugou_server'
   s.version          = '0.1.0'
@@ -185,10 +189,10 @@ Pod::Spec.new do |s|
   s.user_target_xcconfig = {
     'OTHER_LDFLAGS' => '\$(inherited)' \\
       ' -force_load "$DEVICE_LIB"' \\
-      ' -u _start_server' \\
-      ' -u _stop_server' \\
-      ' -u _is_server_running' \\
-      ' -u _get_server_port'
+      ' -Wl,-u,_start_server' \\
+      ' -Wl,-u,_stop_server' \\
+      ' -Wl,-u,_is_server_running' \\
+      ' -Wl,-u,_get_server_port'
   }
 end
 PODSPEC
