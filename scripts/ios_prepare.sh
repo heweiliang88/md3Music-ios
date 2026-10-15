@@ -223,14 +223,49 @@ PY
 
 # -----------------------------------------------------------------------------
 # 6. Podfile：接入 kugou_server（存在 XCFramework 时），全部使用绝对路径
+#
+# ⚠️ 坑（第三次踩）：flutter create **不会**生成 ios/Podfile，
+#    Flutter 要到 `flutter build ios` 阶段才从 SDK 模板生成它。
+#    如果不在补丁前先把 Podfile 建好，补丁就打在空气上，
+#    pod install 依然会"成功"，但 Rust 库永远不会被链接。
+#    这里先从 Flutter SDK 自带模板拷一份，再打补丁。
 # -----------------------------------------------------------------------------
 PODFILE="$IOS_DIR/Podfile"
-if [[ -f "$PODFILE" ]]; then
-  if grep -q 'md3music-ios' "$PODFILE"; then
-    log "Podfile 已打过补丁，跳过"
+
+if [[ ! -f "$PODFILE" ]]; then
+  POD_TEMPLATE=""
+  FR_CANDIDATE="${FLUTTER_ROOT:-}"
+  if [[ -z "$FR_CANDIDATE" ]] && command -v flutter >/dev/null 2>&1; then
+    FR_CANDIDATE="$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")"
+  fi
+
+  if [[ -n "$FR_CANDIDATE" ]]; then
+    for name in Podfile-ios-swift Podfile-ios-objc Podfile-ios; do
+      if [[ -f "$FR_CANDIDATE/packages/flutter_tools/templates/cocoapods/$name" ]]; then
+        POD_TEMPLATE="$FR_CANDIDATE/packages/flutter_tools/templates/cocoapods/$name"
+        break
+      fi
+    done
+    if [[ -z "$POD_TEMPLATE" ]]; then
+      POD_TEMPLATE="$(find "$FR_CANDIDATE/packages/flutter_tools/templates" -maxdepth 3 -name 'Podfile-ios*' -type f 2>/dev/null | head -1 || true)"
+    fi
+  fi
+
+  if [[ -n "$POD_TEMPLATE" && -f "$POD_TEMPLATE" ]]; then
+    cp "$POD_TEMPLATE" "$PODFILE"
+    log "已从 Flutter SDK 模板创建 Podfile：$POD_TEMPLATE"
   else
-    log "给 Podfile 打补丁…"
-    python3 - "$PODFILE" "$DEPLOY_TARGET" "$RUST_DIR" "$XCFRAMEWORK" <<'PY'
+    log "✗ 无法定位 Flutter 的 Podfile 模板（FLUTTER_ROOT=${FLUTTER_ROOT:-未设置}）"
+    log "  没有 Podfile 就无法把 Rust 静态库链进 App"
+    exit 1
+  fi
+fi
+
+if grep -q 'md3music-ios' "$PODFILE"; then
+  log "Podfile 已打过补丁，跳过"
+else
+  log "给 Podfile 打补丁…"
+  python3 - "$PODFILE" "$DEPLOY_TARGET" "$RUST_DIR" "$XCFRAMEWORK" <<'PY'
 import pathlib, sys
 
 podfile = pathlib.Path(sys.argv[1])
@@ -242,7 +277,7 @@ text = podfile.read_text(encoding="utf-8")
 # 6.1 打开 platform 行
 if "\nplatform :ios" not in text:
     for old in ("# platform :ios, '13.0'", "# platform :ios, '12.0'",
-                "# platform :ios, '15.0'"):
+                "# platform :ios, '15.0'", "# platform :ios, '11.0'"):
         if old in text:
             text = text.replace(old, f"platform :ios, '{target}'", 1)
             break
@@ -265,12 +300,16 @@ insert = (
 )
 text = text.replace(marker, insert, 1)
 podfile.write_text(text, encoding="utf-8")
-print(f"[ios-prepare] Podfile 已接入 kugou_server（绝对路径）")
+print("[ios-prepare] Podfile 已接入 kugou_server（绝对路径）")
 PY
-  fi
-else
-  log "警告：未找到 Podfile"
 fi
+
+# 6.3 硬断言：补丁必须真的落地
+if ! grep -q "kugou_server" "$PODFILE"; then
+  log "✗ Podfile 中没有找到 kugou_server —— 补丁未生效"
+  exit 1
+fi
+log "✓ Podfile 已确认接入 kugou_server"
 
 # -----------------------------------------------------------------------------
 # 7. .metadata：登记 ios 平台
