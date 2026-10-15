@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# 移植构建产物（由 CI 在临时目录生成，不入库）
+/app/
+/ios/
+Podfile.lock
+Pods/
+*.xcframework
+*.ipa
+*.dSYM
+
+# 系统
+.DS_Store
