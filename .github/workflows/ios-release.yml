@@ -136,6 +136,18 @@ jobs:
             echo "⚠️ Rust XCFramework 构建失败，IPA 将以「无本地 API」模式产出（见上方日志）"
           fi
 
+      - name: 检查静态库中的导出符号
+        if: ${{ steps.rust.outcome == 'success' }}
+        working-directory: app
+        run: |
+          set -uo pipefail
+          LIB=kugou_api_server/rust/build/KugouServer.xcframework/ios-arm64/libkugou_server.a
+          echo "归档: $LIB ($(du -h "$LIB" | cut -f1))"
+          echo "--- 归档中的 C 导出符号 ---"
+          nm -gU "$LIB" 2>/dev/null | grep -E '_start_server|_stop_server|_is_server_running|_get_server_port' || echo "(归档中未找到这些符号 —— 需要检查 Rust 侧 #[no_mangle] 导出)"
+          echo "--- 归档全局符号总数 ---"
+          nm -gU "$LIB" 2>/dev/null | wc -l
+
       - name: flutter pub get
         working-directory: app
         run: flutter pub get
