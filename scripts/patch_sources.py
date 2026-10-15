@@ -182,6 +182,11 @@ def patch_dart(app: Path) -> None:
     // [md3music-ios] iOS：同样放到 worker isolate，避免 dlopen/Rust 启动占住 UI isolate。
     if (Platform.isIOS) {
       final appDir = await getApplicationSupportDirectory();
+      // Rust 侧要往 data_dir 里写 device_info.json，先保证目录存在，
+      // 否则首次启动时持久化失败可能让服务起不来。
+      if (!appDir.existsSync()) {
+        appDir.createSync(recursive: true);
+      }
       final nativeTimes = await Isolate.run(
         () => _startServerInWorkerIos(appDir.path),
       );
