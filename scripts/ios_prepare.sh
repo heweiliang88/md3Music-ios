@@ -80,8 +80,9 @@ if [[ -n "$ICON_SRC" ]]; then
   rm -f "$ICONSET"/*.png   # 清掉模板自带的 Flutter 默认图标
 
   ICON_OK=0
-  if python3 -c 'import PIL' 2>/dev/null; then
-    python3 - "$ICON_SRC" "$ICONSET/AppIcon-1024.png" <<'PY' && ICON_OK=1
+  PYBIN="${MD3_PYTHON:-python3}"
+  if "$PYBIN" -c 'import PIL' 2>/dev/null; then
+    "$PYBIN" - "$ICON_SRC" "$ICONSET/AppIcon-1024.png" <<'PY' && ICON_OK=1
 import sys
 from PIL import Image
 
@@ -111,9 +112,14 @@ PY
 
   if [[ "$ICON_OK" != "1" ]]; then
     log "未安装 Pillow，退回 sips 处理"
+    # jpeg 中转可去掉 alpha 通道（iOS 图标不允许透明）
+    W=$(sips -g pixelWidth "$ICON_SRC" | awk '/pixelWidth/{print $2}')
+    H=$(sips -g pixelHeight "$ICON_SRC" | awk '/pixelHeight/{print $2}')
+    S=$(( W < H ? W : H ))
     sips -s format jpeg "$ICON_SRC" --out /tmp/md3_icon.jpg >/dev/null
     sips -s format png /tmp/md3_icon.jpg --out "$ICONSET/AppIcon-1024.png" >/dev/null
-    sips --resampleHeightWidth 1024 1024 "$ICONSET/AppIcon-1024.png" >/dev/null
+    sips -c "$S" "$S" "$ICONSET/AppIcon-1024.png" >/dev/null   # 居中裁剪为正方形
+    sips -z 1024 1024 "$ICONSET/AppIcon-1024.png" >/dev/null   # 缩放到 1024
   fi
 
   cat > "$ICONSET/Contents.json" <<'JSON'
