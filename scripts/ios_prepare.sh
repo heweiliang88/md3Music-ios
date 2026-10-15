@@ -153,17 +153,24 @@ cat > "$RUST_DIR/kugou_server.podspec" <<PODSPEC
 # 这个 pod 不提供任何源码，唯一作用是给 Runner（App）target 注入
 # -force_load，把 Rust 静态库整体链进主程序。
 #
-# 为什么必须 -force_load：
+# 为什么必须 -force_load + -u：
 #   libkugou_server.a 里的 start_server / stop_server / is_server_running
 #   是给 Dart FFI 在**运行时**用 DynamicLibrary.process() 查找的，
-#   没有任何 Objective-C / Swift 代码静态引用它们。链接器默认按需取用
-#   （archive 中不被引用的目标文件会被整体丢弃），导致符号在最终二进制里
-#   不存在，App 启动本地 API 服务时必然失败。
+#   没有任何 Objective-C / Swift 代码静态引用它们。这会导致两个连锁问题：
+#
+#     1) 链接器按需取用，archive 里不被引用的目标文件直接丢弃  -> -force_load
+#     2) 即便 force_load 把目标文件读进来了，-dead_strip 仍会把
+#        "无人引用"的代码整个剔除（实测：二进制里只剩该 .a 的 OSO 调试映射，
+#        813 个全局符号里找不到 _start_server）              -> -u <symbol>
+#
+#   -u 把符号声明为"必须解析的未定义引用"，链接器就会把它当作死代码消除的
+#   根节点，连同它可达的整条调用链（tiny_http / ureq / rustls ...）一起保留，
+#   并作为全局符号导出到主程序，dlsym 才能查到。
 Pod::Spec.new do |s|
   s.name             = 'kugou_server'
   s.version          = '0.1.0'
   s.summary          = 'MD3Music embedded Rust API server (static library linker flags)'
-  s.description      = 'Injects -force_load for the Rust staticlib so Dart FFI can resolve start_server/stop_server/is_server_running on iOS.'
+  s.description      = 'Injects -force_load/-u for the Rust staticlib so Dart FFI can resolve start_server/stop_server/is_server_running on iOS.'
   s.homepage         = 'https://github.com/heweiliang88/md3Music-ios'
   s.license          = { :type => 'AGPL-3.0' }
   s.author           = { 'md3music-ios' => 'noreply@example.com' }
@@ -174,7 +181,12 @@ Pod::Spec.new do |s|
   s.preserve_paths = 'build/KugouServer.xcframework'
 
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '\$(inherited) -force_load "$DEVICE_LIB"'
+    'OTHER_LDFLAGS' => '\$(inherited)' \\
+      ' -force_load "$DEVICE_LIB"' \\
+      ' -u _start_server' \\
+      ' -u _stop_server' \\
+      ' -u _is_server_running' \\
+      ' -u _get_server_port'
   }
 end
 PODSPEC
