@@ -31,6 +31,16 @@ jobs:
           channel: stable
           cache: true
 
+      - name: 准备图标处理依赖（Pillow，失败则回退 sips）
+        id: pillow
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/iconvenv"
+          "$RUNNER_TEMP/iconvenv/bin/pip" install --quiet --disable-pip-version-check pillow
+          echo "MD3_PYTHON=$RUNNER_TEMP/iconvenv/bin/python" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/iconvenv/bin/python" -c "import PIL; print('Pillow', PIL.__version__)"
+
       - name: 准备上游源码
         run: |
           set -euo pipefail
