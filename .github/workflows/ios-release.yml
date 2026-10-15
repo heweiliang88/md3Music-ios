@@ -159,11 +159,12 @@ jobs:
           retention-days: 90
 
       - name: 上传 dSYM（用于符号化崩溃日志）
-        if: ${{ hashFiles('app/build/ios/iphoneos/Runner.app.dSYM') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: dsym-${{ steps.package.outputs.APP_VERSION }}
-          path: app/build/ios/iphoneos/Runner.app.dSYM
+          path: |
+            app/build/ios/iphoneos/Runner.app.dSYM
+            app/build/ios/iphoneos/*.dSYM
           if-no-files-found: ignore
           retention-days: 30
 
