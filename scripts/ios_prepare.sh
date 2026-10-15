@@ -23,7 +23,7 @@ PORT_DIR="$(cd "$PORT_DIR" && pwd)"
 IOS_DIR="$APP_DIR/ios"
 BUNDLE_ORG="com.md3music"
 PROJECT_NAME="md3music"
-DEPLOY_TARGET="14.0"
+DEPLOY_TARGET="15.0"
 
 log() { printf '[ios-prepare] %s\n' "$*"; }
 
